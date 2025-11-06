@@ -1,2 +1,4 @@
 .env
 __pycache__/
+transcript_*.txt
+episode_*.mp3
