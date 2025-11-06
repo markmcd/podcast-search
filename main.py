@@ -2,6 +2,7 @@ import os
 import argparse
 from pathlib import Path
 import time
+import concurrent.futures
 
 from dotenv import load_dotenv
 import feedparser
@@ -79,12 +80,102 @@ def get_existing_episodes(client, store_name):
             existing_episodes.add(doc.display_name)
     return existing_episodes
 
+def process_episode(client, store_name, feed_info, ep, i, keep_temp, existing_episodes):
+    if ep.title in existing_episodes:
+        print(f"Episode '{ep.title}' already exists in store. Skipping.")
+        return
+
+    print(f"Processing episode {i+1}: {ep.title}")
+    
+    # Find audio URL
+    audio_url = None
+    for link in ep.links:
+        if link.get('type', '').startswith('audio/'):
+            audio_url = link.href
+            break
+    
+    if not audio_url:
+        print(f"No audio link found for {ep.title}, skipping.")
+        return
+
+    audio_filename = f"episode_{i}.mp3"
+    transcript_filename = f"transcript_{i}.txt"
+    try:
+        download_audio(audio_url, audio_filename)
+        transcript = transcribe_audio(client, audio_filename)
+        
+        with open(transcript_filename, 'w') as f:
+            f.write(f"Title: {ep.title}\n")
+            f.write(f"Podcast: {feed_info.title}\n")
+            f.write(f"Date: {ep.get('published', '')}\n")
+            f.write("\nTranscript:\n")
+            f.write(transcript)
+        
+        print(f"Uploading transcript for {ep.title} to store...")
+        
+        # Prepare metadata
+        metadata = [
+            {'key': 'title', 'string_value': ep.title},
+            {'key': 'podcast', 'string_value': feed_info.title},
+        ]
+        
+        if 'link' in ep:
+            metadata.append({'key': 'url', 'string_value': ep.link})
+            
+        # Thumbnail
+        thumbnail_url = None
+        if 'image' in ep and 'href' in ep.image:
+            thumbnail_url = ep.image.href
+        elif 'media_thumbnail' in ep and len(ep.media_thumbnail) > 0:
+            thumbnail_url = ep.media_thumbnail[0]['url']
+        
+        if thumbnail_url:
+            metadata.append({'key': 'thumbnail_url', 'string_value': thumbnail_url})
+
+        # Date
+        if 'published_parsed' in ep and ep.published_parsed:
+            pub_date = ep.published_parsed
+            metadata.append({'key': 'year', 'numeric_value': pub_date.tm_year})
+            metadata.append({'key': 'month', 'numeric_value': pub_date.tm_mon})
+            metadata.append({'key': 'day', 'numeric_value': pub_date.tm_mday})
+
+        if 'tags' in ep:
+            for tag in ep.tags:
+                    metadata.append({'key': 'tag', 'string_value': tag.term})
+
+        op = client.file_search_stores.upload_to_file_search_store(
+            file_search_store_name=store_name,
+            file=transcript_filename,
+            config={
+                'custom_metadata': metadata,
+                'display_name': ep.title
+            }
+        )
+        
+        while not op.done:
+            time.sleep(2)
+            op = client.operations.get(op)
+        print(f"Uploaded {ep.title} to store.")
+
+    except Exception as e:
+        print(f"Error processing {ep.title}: {e}")
+    finally:
+        # Cleanup
+        if not keep_temp:
+            if os.path.exists(audio_filename):
+                os.remove(audio_filename)
+            if os.path.exists(transcript_filename):
+                os.remove(transcript_filename)
+        else:
+            print(f"Keeping temporary files: {audio_filename}, {transcript_filename}")
+
 def main():
     parser = argparse.ArgumentParser(description="Ingest podcast into Gemini File Search Store")
     parser.add_argument("rss_url", help="URL of the podcast RSS feed")
     parser.add_argument("--limit", type=int, default=0, help="Number of episodes to process (0 for all)")
-    parser.add_argument("--store", default="PodcastStore", help="Name of the File Search Store")
+    parser.add_argument("--store", default="Podcasts", help="Name of the File Search Store")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary audio and transcript files")
+    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     args = parser.parse_args()
 
     client = setup_client()
@@ -96,95 +187,22 @@ def main():
 
     feed_info, episodes = get_episodes(args.rss_url, args.limit)
 
-    for i, ep in enumerate(episodes):
-        print(f"Processing episode {i+1}/{len(episodes)}: {ep.title}")
-        
-        if ep.title in existing_episodes:
-            print(f"Episode '{ep.title}' already exists in store. Skipping.")
-            continue
-
-        # Find audio URL
-        audio_url = None
-        for link in ep.links:
-            if link.get('type', '').startswith('audio/'):
-                audio_url = link.href
-                break
-        
-        if not audio_url:
-            print(f"No audio link found for {ep.title}, skipping.")
-            continue
-
-        audio_filename = f"episode_{i}.mp3"
-        try:
-            download_audio(audio_url, audio_filename)
-            transcript = transcribe_audio(client, audio_filename)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = []
+        for i, ep in enumerate(episodes):
+            if ep.title in existing_episodes:
+                print(f"Episode '{ep.title}' already exists in store. Skipping.")
+                continue
             
-            transcript_filename = f"transcript_{i}.txt"
-            with open(transcript_filename, 'w') as f:
-                f.write(f"Title: {ep.title}\n")
-                f.write(f"Podcast: {feed_info.title}\n")
-                f.write(f"Date: {ep.get('published', '')}\n")
-                f.write("\nTranscript:\n")
-                f.write(transcript)
-            
-            print(f"Uploading transcript to store...")
-            
-            # Prepare metadata
-            metadata = [
-                {'key': 'title', 'string_value': ep.title},
-                {'key': 'podcast', 'string_value': feed_info.title},
-            ]
-            
-            if 'link' in ep:
-                metadata.append({'key': 'url', 'string_value': ep.link})
-                
-            # Thumbnail
-            thumbnail_url = None
-            if 'image' in ep and 'href' in ep.image:
-                thumbnail_url = ep.image.href
-            elif 'media_thumbnail' in ep and len(ep.media_thumbnail) > 0:
-                thumbnail_url = ep.media_thumbnail[0]['url']
-            
-            if thumbnail_url:
-                metadata.append({'key': 'thumbnail_url', 'string_value': thumbnail_url})
-
-            # Date
-            if 'published_parsed' in ep and ep.published_parsed:
-                pub_date = ep.published_parsed
-                metadata.append({'key': 'year', 'numeric_value': pub_date.tm_year})
-                metadata.append({'key': 'month', 'numeric_value': pub_date.tm_mon})
-                metadata.append({'key': 'day', 'numeric_value': pub_date.tm_mday})
-
-            if 'tags' in ep:
-                for tag in ep.tags:
-                     metadata.append({'key': 'tag', 'string_value': tag.term})
-
-            op = client.file_search_stores.upload_to_file_search_store(
-                file_search_store_name=store.name,
-                file=transcript_filename,
-                config={
-                    'custom_metadata': metadata,
-                    'display_name': ep.title
-                }
+            futures.append(
+                executor.submit(process_episode, client, store.name, feed_info, ep, i, args.keep_temp, existing_episodes)
             )
-            
-            while not op.done:
-                time.sleep(2)
-                op = client.operations.get(op)
-            print(f"Uploaded {ep.title} to store.")
-            existing_episodes.add(ep.title) # Add to set to avoid reprocessing if duplicate in feed
-
-        except Exception as e:
-            print(f"Error processing {ep.title}: {e}")
-        finally:
-            # Cleanup
-            if not args.keep_temp:
-                if os.path.exists(audio_filename):
-                    os.remove(audio_filename)
-                if os.path.exists(transcript_filename):
-                    os.remove(transcript_filename)
-            else:
-                print(f"Keeping temporary files: {audio_filename}, {transcript_filename}")
+        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"An error occurred in a worker thread: {e}")
 
 if __name__ == "__main__":
     main()
