@@ -140,8 +140,11 @@ def process_episode(client, store_name, feed_info, ep, i, keep_temp, existing_ep
             metadata.append({'key': 'day', 'numeric_value': pub_date.tm_mday})
 
         if 'tags' in ep:
+            seen_tags = set()
             for tag in ep.tags:
+                if tag.term not in seen_tags:
                     metadata.append({'key': 'tag', 'string_value': tag.term})
+                    seen_tags.add(tag.term)
 
         op = client.file_search_stores.upload_to_file_search_store(
             file_search_store_name=store_name,
