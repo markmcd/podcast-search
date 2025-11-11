@@ -35,7 +35,7 @@ def main():
     metadata_filter = None
     if args.podcast:
         # Assuming the key in custom_metadata is 'podcast'
-        metadata_filter = f"podcast = {args.podcast}"
+        metadata_filter = f'podcast = "{args.podcast}"'
 
     print(f"Querying store '{store.display_name}' with question: '{args.question}'")
     if metadata_filter:
