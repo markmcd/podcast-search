@@ -57,3 +57,13 @@ python query.py "What was the main topic discussed in the latest episode?"
 
 Gemini will search the indexed transcripts and provide an answer based on the actual content, complete with citations.
 
+## Disclaimer
+
+This project is intended for demonstration purposes only. It is not
+intended for use in a production environment.
+
+This is not an officially supported Google product. This project is not
+eligible for the [Google Open Source Software Vulnerability Rewards
+Program](https://bughunters.google.com/open-source-security).
+
+See the Gemini API terms of service at https://ai.google.dev/gemini-api/terms
